@@ -23,18 +23,18 @@ import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from mhealth_feature_generation import simple_features_duration, dataloader
+from mhealth_feature_generation import simple_features, dataloader
 from tqdm import tqdm
 from p_tqdm import p_map
 import warnings
 
 
 def collectHKMetrics(subject_data):
-    hr = simple_features_duration.aggregateVital(
+    hr = simple_features.aggregateVital(
         subject_data,
         "HeartRate",
         resample="1h",
-        range=(30, 200),
+        vital_range=(30, 200),
         standard_aggregations=[
             "mean",
             "std",
@@ -45,14 +45,14 @@ def collectHKMetrics(subject_data):
             "skew",
             "kurtosis",
         ],
-        circadian_model_aggregation=False,
+        circadian_model_aggregations=True,
         linear_time_aggregations=False,
     )
-    hrv = simple_features_duration.aggregateVital(
+    hrv = simple_features.aggregateVital(
         subject_data,
         "HeartRateVariabilitySDNN",
         resample="1h",
-        range=(0, 3),
+        vital_range=(0, 3),
         standard_aggregations=[
             "mean",
             "min",
@@ -61,13 +61,13 @@ def collectHKMetrics(subject_data):
             "median",
         ],
         linear_time_aggregations=False,
-        circadian_model_aggregation=False,
+        circadian_model_aggregations=False,
     )
-    spo2 = simple_features_duration.aggregateVital(
+    spo2 = simple_features.aggregateVital(
         subject_data,
         "OxygenSaturation",
         resample="1h",
-        range=(0, 40),
+        vital_range=(0, 40),
         standard_aggregations=[
             "mean",
             "std",
@@ -76,13 +76,13 @@ def collectHKMetrics(subject_data):
             "median",
         ],
         linear_time_aggregations=False,
-        circadian_model_aggregation=False,
+        circadian_model_aggregations=False,
     )
-    rr = simple_features_duration.aggregateVital(
+    rr = simple_features.aggregateVital(
         subject_data,
         "RespiratoryRate",
         resample="1h",
-        range=(0, 40),
+        vital_range=(0, 40),
         standard_aggregations=[
             "mean",
             "std",
@@ -91,7 +91,7 @@ def collectHKMetrics(subject_data):
             "median",
         ],
         linear_time_aggregations=False,
-        circadian_model_aggregation=False,
+        circadian_model_aggregations=False,
     )
     hr["QC_duration_days"] = (
         subject_data["local_start"].max() - subject_data["local_start"].min()
@@ -99,19 +99,19 @@ def collectHKMetrics(subject_data):
     hr["QC_ndates"] = subject_data["local_start"].dt.date.nunique()
 
     try:
-        sleep = simple_features_duration.aggregateDailySleep(subject_data)
+        sleep = simple_features.aggregateDailySleep(subject_data)
     except ValueError:
         sleep = pd.DataFrame()
-    exercise_time = simple_features_duration.processActiveDuration(
+    exercise_time = simple_features.aggregateActiveDuration(
         subject_data, "AppleExerciseTime"
     )
-    paee = simple_features_duration.processActiveDuration(
+    paee = simple_features.aggregateActiveDuration(
         subject_data, "ActiveEnergyBurned"
     )
-    steps = simple_features_duration.processActiveDuration(
+    steps = simple_features.aggregateActiveDuration(
         subject_data, "StepCount"
     )
-    watch_on = simple_features_duration.processWatchOnPercent(
+    watch_on = simple_features.processWatchOnPercent(
         subject_data, resample="1h"
     )
     feature_data = pd.concat(
@@ -213,7 +213,7 @@ if __name__ == "__main__":
 
         def HKMetricWrapper(inputs):
             user, survey_start, duration = inputs
-            subject_data = simple_features_duration.getDurationAroundTimestamp(
+            subject_data = simple_features.getDurationAroundTimestamp(
                 hk_data,
                 user,
                 survey_start,

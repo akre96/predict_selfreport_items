@@ -1,8 +1,8 @@
 set -euo pipefail
 
 # Inputs
-SURVEY_DATA=~/Data/OPTIMA/survey_data_Aug032023.csv
-SENSOR_DATA_FOLDER=~/Data/OPTIMA/HealthKit_Datastreams
+SURVEY_DATA=~/Data/OPTIMA/OPTIMA_Surveys/survey_data_12Oct2023_ts.csv
+SENSOR_DATA_FOLDER=~/Data/OPTIMA/OPTIMA_HealthKit/HealthKit_Datastreams
 SURVEYS="psqi phq14 pvss"
 THRESHOLDS=~/Data/OPTIMA/OPTIMA_survey_binarize-July312023.xlsx
 
