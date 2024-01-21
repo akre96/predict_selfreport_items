@@ -12,9 +12,24 @@ inputs:
         - model_weights
 """
 
-from sklearn.model_selection import StratifiedGroupKFold, cross_validate
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import (
+    StratifiedGroupKFold,
+    KFold,
+    RandomizedSearchCV,
+)
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.dummy import DummyClassifier
+from sklearn.feature_selection import (
+    SelectKBest,
+    mutual_info_classif,
+    f_classif,
+)
+from sklearn.impute import SimpleImputer
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.pipeline import Pipeline
 import shap
+from shap.utils._exceptions import InvalidModelError
 import argparse
 import pandas as pd
 import numpy as np
@@ -22,7 +37,139 @@ import pingouin as pg
 from pathlib import Path
 import pickle
 from tqdm import tqdm
+from typing import Tuple
+import multiprocessing
 
+NUM_CORES = multiprocessing.cpu_count()
+
+def train_test_model(
+    outcome_df: pd.DataFrame,
+    hk_feature_df: pd.DataFrame,
+    metrics: list[str],
+    hk_features: list[str],
+    demographics: pd.DataFrame | None = None,
+    demog_features: list[str] = [],
+    dropna_subset: list[str] = ["response_binary"],
+    inner_cv=KFold(n_splits=5, shuffle=True, random_state=42),
+    model_name: str = "lr",
+    model: object = LogisticRegression(),
+    param_grid: dict = {
+        "feature_select__k": [10, "all"],
+        "feature_select__score_func": [mutual_info_classif, f_classif],
+    },
+    n_folds: int = 5,
+) -> Tuple[pd.DataFrame, object]:
+    ml_data = hk_feature_df.merge(
+        outcome_df, on=["user_id", "survey_start"], how="left", validate="1:1"
+    ).dropna(subset=dropna_subset)
+
+    input_features = hk_features
+    if (demographics is not None) and (len(demog_features) > 0):
+        ml_data = ml_data.merge(
+            demographics[["user_id", *demog_features]],
+            on="user_id",
+            how="left",
+        ).dropna(subset=demog_features)
+        input_features = hk_features + demog_features
+
+    X = ml_data[input_features].copy()
+    y = ml_data["response_binary"].astype(int)
+    pipe = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median")),
+            ("variance_threshold", VarianceThreshold()),
+            ("feature_select", SelectKBest(k="all")),
+            ("model", model),
+        ]
+    )
+    if len(hk_features) == 1:
+        param_grid = {}
+    if model_name == "lr":
+        n_iter = 4
+    elif len(param_grid) > 0:
+        n_iter = 5
+    else:
+        n_iter = 1
+    random_search = RandomizedSearchCV(
+        estimator=pipe,
+        param_distributions=param_grid,
+        scoring="average_precision",
+        n_iter=n_iter,
+        cv=inner_cv,
+        refit="average_precision",
+        random_state=0,
+        n_jobs=5,
+    )
+    cv = StratifiedGroupKFold(n_splits=n_folds)
+
+    # Get individual fold prediction errors, split by weeks since baseline
+    preds = []
+    for i, (train_idx, test_idx) in enumerate(
+        cv.split(X, y, groups=ml_data.user_id)
+    ):
+        random_search.fit(X.iloc[train_idx], y.iloc[train_idx])
+        m = random_search.best_estimator_.named_steps['model']
+
+        if isinstance(m, DummyClassifier):
+            shap_vals = np.zeros((len(test_idx), len(input_features)))
+            selected_feature_names = input_features
+        else:
+            preprocess = Pipeline(random_search.best_estimator_.steps[:-1])
+            # Get the feature selection transformer
+            feature_select = random_search.best_estimator_.named_steps['feature_select']
+
+            # Get the boolean mask of selected features
+            selected_mask = feature_select.get_support()
+
+            # Get the feature names from the imputer
+            imputer = random_search.best_estimator_.named_steps['imputer']
+            feature_names_after_imputation = imputer.get_feature_names_out()
+
+            # Index into the feature names with the mask
+            selected_feature_names = feature_names_after_imputation[selected_mask]
+            if isinstance(m, RandomForestClassifier) or isinstance(m, GradientBoostingClassifier):
+                explainer = shap.TreeExplainer(m)
+            elif isinstance(m, LogisticRegression):
+                explainer = shap.LinearExplainer(m, preprocess.transform(X.iloc[train_idx]))
+            else:
+                raise InvalidModelError(f"Model {m} not supported")
+            raw_shap_vals = explainer.shap_values(preprocess.transform(X.iloc[test_idx]))
+
+            temp_shap_df = pd.DataFrame(raw_shap_vals, columns=selected_feature_names)
+            shap_df = temp_shap_df.reindex(columns=input_features, fill_value=0)
+            shap_vals = shap_df.to_numpy()
+
+
+        
+        preds.append(
+            pd.DataFrame(
+                {
+                    "y_true": y.iloc[test_idx],
+                    "y_pred": random_search.predict(X.iloc[test_idx]),
+                    "y_pred_proba": random_search.predict_proba(X.iloc[test_idx])[
+                        :, 1
+                    ],
+                    "SHAP_values": list(shap_vals),
+                    "redcap_event_name": ml_data.iloc[
+                        test_idx
+                    ].redcap_event_name,
+                    "survey_start": ml_data.iloc[test_idx].survey_start,
+                    "user_id": ml_data.iloc[test_idx].user_id,
+                    "fold": [i] * len(test_idx),
+                    **{f: ml_data.iloc[test_idx][f] for f in input_features},
+                }
+            )
+        )
+
+    predictions = pd.concat(preds)
+    predictions["model"] = model_name
+    full_model = random_search.fit(X, y)
+    return predictions, full_model.best_estimator_
+
+
+
+
+## RUN MODELING
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -43,8 +190,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output-folder", type=str, help="folder to write results to"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="run in debug mode (only use 1 survey item)",
+    )
     args = parser.parse_args()
 
+    inner_cv = KFold(n_splits=5, shuffle=True, random_state=42)
+    binary_metrics = ["roc_auc", "average_precision"]
+
+    print('Checking input files')
     # Check that all files exist
     for item in [
         args.survey_data,
@@ -52,7 +208,8 @@ if __name__ == "__main__":
         args.binary_thresholds,
     ]:
         assert Path(item).exists(), f"{item} does not exist"
-
+    
+    print('Loading data')
     survey_data = pd.read_csv(args.survey_data, parse_dates=["survey_start"])
     sensor_features = pd.read_csv(
         args.sensor_features, parse_dates=["survey_start"]
@@ -62,9 +219,6 @@ if __name__ == "__main__":
     survey_data = survey_data.merge(binary_thresholds, how="inner")
     survey_data["response_binary"] = (
         pd.to_numeric(survey_data.response) > survey_data.threshold_leq
-    )
-    sensor_survey = sensor_features.merge(
-        survey_data, how="inner", validate="1:m"
     )
 
     if not Path(args.output_folder).exists():
@@ -77,20 +231,61 @@ if __name__ == "__main__":
         if c not in ["user_id", "survey", "survey_start", "duration"]
         and not c.startswith("QC_")
     ]
-    performances = []
+
     used_data = []
+    all_preds = []
 
     cv = StratifiedGroupKFold(n_splits=10)
+    model_paramgrid = [
+        (
+            "rf",
+            RandomForestClassifier(),
+            {
+                "model__n_estimators": [100, 200, 500],
+                "model__max_depth": [5, 10, 20],
+                "model__min_samples_leaf": [2, 5, 10],
+                "model__max_features": [None, "sqrt", "log2"],
+                "model__random_state": [42],
+                "feature_select__k": [10, "all"],
+                "feature_select__score_func": [mutual_info_classif, f_classif],
+            },
+        ),
+        (
+            "gb",
+            GradientBoostingClassifier(),
+            {
+                "model__n_estimators": [100, 200, 500],
+                "model__max_depth": [5, 10, 20],
+                "model__min_samples_leaf": [2, 5, 10],
+                "model__max_features": [None, "sqrt", "log2"],
+                "model__random_state": [42],
+                "feature_select__k": [10, "all"],
+                "feature_select__score_func": [mutual_info_classif, f_classif],
+            },
+        ),
+        (
+            "lr",
+            LogisticRegression(),
+            {
+                "feature_select__k": [10, "all"],
+                "feature_select__score_func": [mutual_info_classif, f_classif],
+            },
+        ),
+        ("dummy", DummyClassifier(), {}),
+    ]
+    if args.debug:
+        model_paramgrid = [model_paramgrid[2]]
 
     # Cross-validation performed for each item
-    for (item, survey), item_df in tqdm(
-        sensor_survey.groupby(["question", "survey"]),
-    ):
-        for f in feature_cols:
-            item_df[f] = item_df[f].replace([np.inf, -np.inf], np.nan)
-            item_df[f] = item_df[f].astype("float32")
+    print("Running cross-validation")
+    debug_run_complete = False
+    for i, ((item, survey), item_df) in enumerate(tqdm(
+        survey_data.groupby(["question", "survey"]),
+    )):
+        if args.debug and debug_run_complete:
+            break
 
-        item_df = item_df.dropna(subset=["response_binary", *feature_cols])
+        item_df = item_df.dropna(subset=["response_binary"])
         if item_df.response_binary.nunique() < 2:
             print(
                 f"Skipping {survey} - {item} due to homogenous response: {item_df.response_binary.value_counts()}"
@@ -107,198 +302,43 @@ if __name__ == "__main__":
                 f"Skipping {survey} - {item} due to homogenous response: {item_df.response.value_counts()}"
             )
             continue
-        # Fit model on all data and save result as pickle
-        clf = GradientBoostingClassifier(random_state=42)
-        clf.fit(item_df[feature_cols], item_df["response_binary"])
-        out_path = Path(args.output_folder, f"{survey}_{item}_model.pkl")
-        with open(out_path, "wb") as f:
-            pickle.dump(clf, f)
 
-        # Perform cross-validation
-        clf = GradientBoostingClassifier(random_state=42)
-        try:
-            performance = pd.DataFrame(
-                cross_validate(
-                    clf,
-                    item_df[feature_cols],
-                    item_df["response_binary"],
-                    cv=cv,
-                    groups=item_df["user_id"],
-                    scoring=[
-                        "average_precision",
-                        "roc_auc",
-                    ],
-                    return_estimator=True,
-                    n_jobs=-1,
-                )
+        for model_name, model, param_grid in tqdm(model_paramgrid, leave=False, desc=f"Training Models {survey} - {item}"):
+            predictions, trained_model = train_test_model(
+                item_df,
+                sensor_features,
+                binary_metrics,
+                feature_cols,
+                demographics=None,
+                demog_features=[],
+                dropna_subset=["response_binary"],
+                inner_cv=inner_cv,
+                model_name=model_name,
+                model=model,
+                param_grid=param_grid,
+                n_folds=5,
             )
+            predictions["outcome"] = item
+            predictions["survey"] = survey
+            predictions["model"] = model_name
+            predictions["n_users"] = item_df.user_id.nunique()
+            predictions["n"] = item_df.shape[0]
+            all_preds.append(predictions)
+            used_data.append(item_df)
 
-            ix_training, ix_test = [], []
-            # Loop through each fold and append the training & test indices to the empty lists above
-            for fold in cv.split(
-                item_df[feature_cols],
-                item_df["response_binary"],
-                item_df["user_id"],
-            ):
-                ix_training.append(fold[0])
-                ix_test.append(fold[1])
+            model_folder = Path(args.output_folder, f"{survey}_{item}")
+            if not model_folder.exists():
+                model_folder.mkdir()
+            out_path = Path(
+                model_folder, f"{survey}_{item}_{model_name}.pkl"
+            )
+            with open(out_path, "wb") as f:
+                pickle.dump(trained_model, f)
+        debug_run_complete = True
 
-            SHAP_values_per_fold = []
+    model_predictions = pd.concat(all_preds)
+    not_feature_cols = [c for c in model_predictions.columns if c not in feature_cols]
+    model_predictions = model_predictions[not_feature_cols + feature_cols]
+    print('Saving predictions to', Path(args.output_folder, "binary_predictions.csv"))
+    model_predictions.to_csv(Path(args.output_folder, "binary_predictions.csv"), index=False)
 
-            # Loop through each outer fold and extract SHAP values
-            responses = []
-            predictions = []
-            uids = []
-            for i, (train_outer_ix, test_outer_ix) in enumerate(
-                zip(ix_training, ix_test)
-            ):  # -#-#
-                X_train, X_test = (
-                    item_df.iloc[train_outer_ix][feature_cols],
-                    item_df.iloc[test_outer_ix][feature_cols],
-                )
-                y_train, y_test = (
-                    item_df["response_binary"].iloc[train_outer_ix],
-                    item_df["response_binary"].iloc[test_outer_ix],
-                )
-                model = performance["estimator"][i]
-                y_hat = model.predict_proba(X_test)
-                responses.append(y_test)
-                predictions.append(y_hat)
-                uids.append(item_df.iloc[test_outer_ix]["user_id"])
-
-                # Use SHAP to explain predictions
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X_test)
-                SHAP_values_per_fold.append(shap_values)  # -#-#
-        except ValueError as e:
-            print(f"Skipping {survey} - {item} due to error: {e}")
-            continue
-        performance["survey"] = survey
-        performance["item"] = item
-        performance["fold"] = performance.index
-        performance["n"] = item_df.shape[0]
-        performance["n_users"] = item_df["user_id"].nunique()
-        performance["SHAP_values"] = SHAP_values_per_fold
-        performance["ix_test"] = ix_test
-        performance["responses"] = responses
-        performance["predictions"] = predictions
-        performance["uids"] = uids
-        performances.append(performance)
-        used_data.append(item_df)
-
-    binary_performance_df = pd.concat(performances)
-    print(
-        "Saving performance results to",
-        Path(args.output_folder, "binary_performance.csv"),
-    )
-    binary_performance_df.to_csv(
-        Path(args.output_folder, "binary_performance.csv"), index=False
-    )
-    # Get feature importances
-    feature_importances = []
-    for i, row in binary_performance_df.iterrows():
-        feats = pd.DataFrame({"features": feature_cols})
-        feats["gini_impurity"] = row["estimator"].feature_importances_
-        feats["survey"] = row.survey
-        feats["item"] = row["item"]
-        feats["fold"] = row.fold
-        feats["n"] = row.n
-        feats["n_users"] = row.n_users
-
-        feature_importances.append(feats)
-
-    print(
-        "Saving feature importances to",
-        Path(args.output_folder, "gini_feature_importances.csv"),
-    )
-    binary_fi_df = pd.concat(feature_importances)
-    binary_fi_df.to_csv(
-        Path(args.output_folder, "gini_feature_importances.csv"), index=False
-    )
-
-    # Test that performance > 0.5 ROC AUC
-    binary_performance_df["p"] = np.nan
-    binary_perf_results = []
-    for it, it_df in binary_performance_df.groupby(["survey", "item"]):
-        # test that test_roc_auc is > 0 with p value of 0.05 or less
-        auroc_result = pg.ttest(it_df.test_roc_auc, 0.5, alternative="greater")
-        auroc_result["survey"] = it[0]
-        auroc_result["item"] = it[1]
-        auroc_result["mean_auroc"] = it_df.test_roc_auc.mean()
-        auroc_result["median_auroc"] = it_df.test_roc_auc.median()
-        auroc_result["max_auroc"] = it_df.test_roc_auc.max()
-        auroc_result["min_auroc"] = it_df.test_roc_auc.min()
-        auroc_result["normality"] = pg.normality(it_df.test_roc_auc)[
-            "normal"
-        ].iloc[0]
-        binary_perf_results.append(auroc_result)
-
-    binary_performance_test = pd.concat(binary_perf_results)
-    binary_performance_test["p_adj"] = pg.multicomp(
-        binary_performance_test["p-val"], method="fdr_bh"
-    )[1]
-    binary_performance_test = binary_performance_test.sort_values(
-        "p_adj", ascending=True
-    )
-    print(
-        "Saving performance test results to",
-        Path(args.output_folder, "binary_performance_test.csv"),
-    )
-    binary_performance_test.to_csv(
-        Path(args.output_folder, "binary_performance_test.csv"), index=False
-    )
-    print("Top Models:")
-    print(
-        binary_performance_test.sort_values(by="p_adj")[
-            [
-                "survey",
-                "item",
-                "mean_auroc",
-                "median_auroc",
-                "max_auroc",
-                "min_auroc",
-                "normality",
-                "p-val",
-                "p_adj",
-            ]
-        ]
-    )
-
-    # SHAP feature importance -- not saved yet
-    """
-    significant_surveys = binary_performance_test[
-        binary_performance_test.item.isin(sig_perf.item.tolist())
-    ][["survey", "item"]]
-
-    for (survey, item), s_df in binary_performance_df[
-        binary_performance_df.item.isin(significant_surveys.item.unique())
-    ].groupby(["survey", "item"]):
-        new_index = [
-            ix for ix_test_fold in s_df["ix_test"].to_numpy() for ix in ix_test_fold
-        ]
-        item_df = (
-            sensor_survey.loc[
-                (sensor_survey.survey == survey) & (sensor_survey.question == item)
-            ]
-            .dropna(subset=["response_binary", *feature_cols])
-            .copy()
-            .reset_index(drop=True)
-        )
-        SHAP_values_per_fold = []
-        for ar in s_df["SHAP_values"].to_numpy():
-            for val in ar:
-                SHAP_values_per_fold.append(val)
-        shap.summary_plot(
-            np.array(SHAP_values_per_fold),
-            item_df.reindex(new_index)[feature_cols],
-            show=False,
-            max_display=10,
-            plot_size=(10, 5),
-        )
-        if item in item_map.keys():
-            title = f"{survey_map[survey]}: {item_map[item]}"
-        else:
-            title = f"{survey}: {item}"
-        plt.title(title, fontsize=15)
-        plt.show()
-    """

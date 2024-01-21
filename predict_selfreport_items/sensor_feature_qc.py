@@ -33,6 +33,10 @@ if __name__ == "__main__":
         & (sensor_features.QC_duration_days < 40)
         & (sensor_features.QC_ndates > 4)
     ].copy()
+    qc_features = qc_features.dropna(subset=["sleep_sleepDuration_day_median"])
+    qc_features.loc[
+        qc_features.sleep_Awake_mean.isna(), "sleep_Awake_mean"
+    ] = 0
     print("Sensor features shape:", sensor_features.shape)
     print("QC features shape:", qc_features.shape)
 

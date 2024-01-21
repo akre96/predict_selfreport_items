@@ -29,6 +29,126 @@ from p_tqdm import p_map
 import warnings
 
 
+def get_hkmetrics(user_hk, user_id, ts, window):
+    duration = f"{window}days"
+    hk_window_data = simple_features.getDurationAroundTimestamp(
+        user_hk, user_id, ts, duration=duration
+    )
+    if hk_window_data.empty:
+        return pd.DataFrame()
+
+    # Aggregate features
+    agg_sleep_features = [
+        "sleep_sleepDuration_day",
+        "sleep_bedrestDuration_day",
+        "sleep_sleepHR_day",
+        "sleep_sleepHRV_day",
+        "sleep_wakeAfterSleepOnset_day",
+        "sleep_sleepEfficiency_day",
+        "sleep_sleepOnsetLatency_day",
+        "sleep_bedrestOnsetHours_day",
+        "sleep_bedrestOffsetHours_day",
+        "sleep_sleepOnsetHours_day",
+        "sleep_sleepOffsetHours_day",
+        "sleep_sleepNoise_day",
+    ]
+    sleep_agg = simple_features.aggregateDailySleep(
+        hk_window_data,
+        aggs=["min", "median", "max", "std"],
+        sleep_features=agg_sleep_features,
+    )
+    sleep_cat_agg = simple_features.aggregateSleepCategories(
+        hk_window_data,
+    )
+    paee = simple_features.aggregateActiveDuration(
+        hk_window_data, "ActiveEnergyBurned", qc=False
+    )
+    etime = simple_features.aggregateActiveDuration(
+        hk_window_data, "AppleExerciseTime"
+    )
+    steps = simple_features.aggregateActiveDuration(
+        hk_window_data, "StepCount"
+    )
+    hr = simple_features.aggregateVital(
+        hk_window_data,
+        "HeartRate",
+        resample="1h",
+        standard_aggregations=["min", "median", "max", "std"],
+        linear_time_aggregations=True,
+        circadian_model_aggregations=True,
+        vital_range=(30, 200),
+    )
+    noise = simple_features.aggregateAudioExposure(
+        hk_window_data,
+        resample="1h",
+    )
+    hrv = simple_features.aggregateVital(
+        hk_window_data,
+        "HeartRateVariabilitySDNN",
+        resample="1h",
+        standard_aggregations=["min", "median", "max", "std"],
+        linear_time_aggregations=True,
+        circadian_model_aggregations=True,
+        vital_range=(0, 1),
+    )
+    o2sat = simple_features.aggregateVital(
+        hk_window_data,
+        "OxygenSaturation",
+        resample="1h",
+        standard_aggregations=["min", "median", "max", "std"],
+        linear_time_aggregations=True,
+        vital_range=(0.5, 1),
+    )
+    rr = simple_features.aggregateVital(
+        hk_window_data,
+        "RespiratoryRate",
+        resample="1h",
+        standard_aggregations=["min", "median", "max", "std"],
+        linear_time_aggregations=True,
+        circadian_model_aggregations=True,
+        vital_range=(0.1, 100),
+    )
+    hk_metrics = pd.concat(
+        [
+            sleep_agg,
+            sleep_cat_agg,
+            paee,
+            etime,
+            steps,
+            hr,
+            hrv,
+            o2sat,
+            rr,
+            noise,
+        ],
+        axis=1,
+    )
+
+    # Add QC metrics
+    start, end = simple_features.calcStartStop(ts, duration)
+    if end != ts:
+        print("Warning: end of window does not match end of data")
+
+    hk_metrics["QC_watch_on_percent"] = simple_features.processWatchOnPercent(
+        hk_window_data, resample="1h", origin=start, end=ts
+    )
+    hk_metrics["QC_watch_on_hours"] = simple_features.processWatchOnTime(
+        hk_window_data, resample="1h", origin=start
+    )
+    hk_metrics["QC_duration_days"] = (
+        hk_window_data["local_start"].max()
+        - hk_window_data["local_start"].min()
+    ) / np.timedelta64(1, "D")
+    hk_metrics["QC_ndates"] = hk_window_data["local_start"].dt.date.nunique()
+
+    # Add metadata
+    hk_metrics["user_id"] = user_id
+    hk_metrics["survey_start"] = ts
+    hk_metrics["expected_duration"] = duration
+
+    return hk_metrics
+
+
 def collectHKMetrics(subject_data):
     hr = simple_features.aggregateVital(
         subject_data,
@@ -108,9 +228,7 @@ def collectHKMetrics(subject_data):
     paee = simple_features.aggregateActiveDuration(
         subject_data, "ActiveEnergyBurned"
     )
-    steps = simple_features.aggregateActiveDuration(
-        subject_data, "StepCount"
-    )
+    steps = simple_features.aggregateActiveDuration(subject_data, "StepCount")
     watch_on = simple_features.processWatchOnPercent(
         subject_data, resample="1h"
     )
