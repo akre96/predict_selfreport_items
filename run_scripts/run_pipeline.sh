@@ -30,7 +30,7 @@ poetry run python predict_selfreport_items/sensor_feature_qc.py \
     --output-file $QC_SENSOR_OUTPUT \
 
 ## Predict Self-Report Items
-poetry run python predict_selfreport_items/predict_selfreport_evaluation.py \
+poetry run python predict_selfreport_items/predict_selfreport_CV.py \
     --survey-data $SURVEY_DATA \
     --sensor-features $QC_SENSOR_OUTPUT \
     --binary-thresholds $THRESHOLDS \

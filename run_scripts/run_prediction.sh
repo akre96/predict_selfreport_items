@@ -12,7 +12,7 @@ QC_SENSOR_OUTPUT=sensordata_qc.csv
 MODEL_OUTPUT=tmp_out
 
 ## Predict Self-Report Items
-poetry run python predict_selfreport_items/predict_selfreport_evaluation.py \
+poetry run python predict_selfreport_items/predict_selfreport_CV.py \
     --survey-data $SURVEY_DATA \
     --sensor-features $QC_SENSOR_OUTPUT \
     --binary-thresholds $THRESHOLDS \
