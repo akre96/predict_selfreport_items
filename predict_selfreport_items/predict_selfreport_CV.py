@@ -27,6 +27,7 @@ from sklearn.feature_selection import (
 )
 from sklearn.impute import SimpleImputer
 from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import RobustScaler
 from sklearn.pipeline import Pipeline
 import shap
 from shap.utils._exceptions import InvalidModelError
@@ -38,9 +39,18 @@ from pathlib import Path
 import pickle
 from tqdm import tqdm
 from typing import Tuple
+from joblib import Parallel, delayed
 import multiprocessing
 
 NUM_CORES = multiprocessing.cpu_count()
+N_JOBS_CV = 5
+N_PROC = np.floor(2 * NUM_CORES / N_JOBS_CV).astype(int)
+if N_PROC == 0:
+    N_PROC = 1
+print(
+    f"Using {N_PROC} cores for parallel processing with {N_JOBS_CV} jobs per core"
+)
+
 
 def train_test_model(
     outcome_df: pd.DataFrame,
@@ -79,6 +89,7 @@ def train_test_model(
             ("imputer", SimpleImputer(strategy="median")),
             ("variance_threshold", VarianceThreshold()),
             ("feature_select", SelectKBest(k="all")),
+            ("scaler", RobustScaler(quantile_range=(5, 95))),
             ("model", model),
         ]
     )
@@ -98,7 +109,7 @@ def train_test_model(
         cv=inner_cv,
         refit="average_precision",
         random_state=0,
-        n_jobs=5,
+        n_jobs=N_JOBS_CV,
     )
     cv = StratifiedGroupKFold(n_splits=n_folds)
 
@@ -108,7 +119,7 @@ def train_test_model(
         cv.split(X, y, groups=ml_data.user_id)
     ):
         random_search.fit(X.iloc[train_idx], y.iloc[train_idx])
-        m = random_search.best_estimator_.named_steps['model']
+        m = random_search.best_estimator_.named_steps["model"]
 
         if isinstance(m, DummyClassifier):
             shap_vals = np.zeros((len(test_idx), len(input_features)))
@@ -116,39 +127,52 @@ def train_test_model(
         else:
             preprocess = Pipeline(random_search.best_estimator_.steps[:-1])
             # Get the feature selection transformer
-            feature_select = random_search.best_estimator_.named_steps['feature_select']
+            feature_select = random_search.best_estimator_.named_steps[
+                "feature_select"
+            ]
 
             # Get the boolean mask of selected features
             selected_mask = feature_select.get_support()
 
             # Get the feature names from the imputer
-            imputer = random_search.best_estimator_.named_steps['imputer']
+            imputer = random_search.best_estimator_.named_steps["imputer"]
             feature_names_after_imputation = imputer.get_feature_names_out()
 
             # Index into the feature names with the mask
-            selected_feature_names = feature_names_after_imputation[selected_mask]
-            if isinstance(m, RandomForestClassifier) or isinstance(m, GradientBoostingClassifier):
+            selected_feature_names = feature_names_after_imputation[
+                selected_mask
+            ]
+            if isinstance(m, RandomForestClassifier) or isinstance(
+                m, GradientBoostingClassifier
+            ):
                 explainer = shap.TreeExplainer(m)
             elif isinstance(m, LogisticRegression):
-                explainer = shap.LinearExplainer(m, preprocess.transform(X.iloc[train_idx]))
+                explainer = shap.LinearExplainer(
+                    m, preprocess.transform(X.iloc[train_idx])
+                )
             else:
                 raise InvalidModelError(f"Model {m} not supported")
-            raw_shap_vals = explainer.shap_values(preprocess.transform(X.iloc[test_idx]))
-
-            temp_shap_df = pd.DataFrame(raw_shap_vals, columns=selected_feature_names)
-            shap_df = temp_shap_df.reindex(columns=input_features, fill_value=0)
+            raw_shap_vals = explainer.shap_values(
+                preprocess.transform(X.iloc[test_idx])
+            )
+            if isinstance(raw_shap_vals, list):
+                raw_shap_vals = raw_shap_vals[1]
+            temp_shap_df = pd.DataFrame(
+                raw_shap_vals, columns=selected_feature_names
+            )
+            shap_df = temp_shap_df.reindex(
+                columns=input_features, fill_value=0
+            )
             shap_vals = shap_df.to_numpy()
 
-
-        
         preds.append(
             pd.DataFrame(
                 {
                     "y_true": y.iloc[test_idx],
                     "y_pred": random_search.predict(X.iloc[test_idx]),
-                    "y_pred_proba": random_search.predict_proba(X.iloc[test_idx])[
-                        :, 1
-                    ],
+                    "y_pred_proba": random_search.predict_proba(
+                        X.iloc[test_idx]
+                    )[:, 1],
                     "SHAP_values": list(shap_vals),
                     "redcap_event_name": ml_data.iloc[
                         test_idx
@@ -165,8 +189,6 @@ def train_test_model(
     predictions["model"] = model_name
     full_model = random_search.fit(X, y)
     return predictions, full_model.best_estimator_
-
-
 
 
 ## RUN MODELING
@@ -195,12 +217,17 @@ if __name__ == "__main__":
         action="store_true",
         help="run in debug mode (only use 1 survey item)",
     )
+    parser.add_argument(
+        "--rerun-cached",
+        action="store_true",
+        help="rerun cached models",
+    )
     args = parser.parse_args()
 
     inner_cv = KFold(n_splits=5, shuffle=True, random_state=42)
     binary_metrics = ["roc_auc", "average_precision"]
 
-    print('Checking input files')
+    print("Checking input files")
     # Check that all files exist
     for item in [
         args.survey_data,
@@ -208,8 +235,8 @@ if __name__ == "__main__":
         args.binary_thresholds,
     ]:
         assert Path(item).exists(), f"{item} does not exist"
-    
-    print('Loading data')
+
+    print("Loading data")
     survey_data = pd.read_csv(args.survey_data, parse_dates=["survey_start"])
     sensor_features = pd.read_csv(
         args.sensor_features, parse_dates=["survey_start"]
@@ -218,7 +245,7 @@ if __name__ == "__main__":
 
     survey_data = survey_data.merge(binary_thresholds, how="inner")
     survey_data["response_binary"] = (
-        pd.to_numeric(survey_data.response) > survey_data.threshold_leq
+        pd.to_numeric(survey_data.response) >= survey_data.threshold
     )
 
     if not Path(args.output_folder).exists():
@@ -228,11 +255,17 @@ if __name__ == "__main__":
     feature_cols = [
         c
         for c in sensor_features.columns
-        if c not in ["user_id", "survey", "survey_start", "duration"]
+        if c
+        not in [
+            "user_id",
+            "survey",
+            "survey_start",
+            "duration",
+            "expected_duration",
+        ]
         and not c.startswith("QC_")
     ]
 
-    used_data = []
     all_preds = []
 
     cv = StratifiedGroupKFold(n_splits=10)
@@ -273,15 +306,15 @@ if __name__ == "__main__":
         ),
         ("dummy", DummyClassifier(), {}),
     ]
-    if args.debug:
-        model_paramgrid = [model_paramgrid[2]]
 
     # Cross-validation performed for each item
     print("Running cross-validation")
     debug_run_complete = False
-    for i, ((item, survey), item_df) in enumerate(tqdm(
-        survey_data.groupby(["question", "survey"]),
-    )):
+    for i, ((item, survey), item_df) in enumerate(
+        tqdm(
+            survey_data.groupby(["question", "survey"]),
+        )
+    ):
         if args.debug and debug_run_complete:
             break
 
@@ -303,7 +336,25 @@ if __name__ == "__main__":
             )
             continue
 
-        for model_name, model, param_grid in tqdm(model_paramgrid, leave=False, desc=f"Training Models {survey} - {item}"):
+        def train_test_wrapper(input_args):
+            model_name, model, param_grid = input_args
+            model_folder = Path(args.output_folder, f"{survey}_{item}")
+            if not model_folder.exists():
+                model_folder.mkdir()
+            out_path = Path(model_folder, f"{survey}_{item}_{model_name}.pkl")
+            predictions_out = Path(
+                model_folder,
+                f"{survey}_{item}_{model_name}_predictions.parquet",
+            )
+            if (
+                out_path.exists()
+                and predictions_out.exists()
+                and not args.rerun_cached
+            ):
+                print(
+                    f"Skipping {survey} - {item} - {model_name} due to existing output"
+                )
+                return pd.read_parquet(predictions_out)
             predictions, trained_model = train_test_model(
                 item_df,
                 sensor_features,
@@ -323,22 +374,32 @@ if __name__ == "__main__":
             predictions["model"] = model_name
             predictions["n_users"] = item_df.user_id.nunique()
             predictions["n"] = item_df.shape[0]
-            all_preds.append(predictions)
-            used_data.append(item_df)
 
-            model_folder = Path(args.output_folder, f"{survey}_{item}")
-            if not model_folder.exists():
-                model_folder.mkdir()
-            out_path = Path(
-                model_folder, f"{survey}_{item}_{model_name}.pkl"
-            )
             with open(out_path, "wb") as f:
                 pickle.dump(trained_model, f)
+            predictions.to_parquet(predictions_out, index=False)
+            return predictions
+
+        all_preds.append(
+            pd.concat(
+                Parallel(n_jobs=N_PROC)(
+                    delayed(train_test_wrapper)(args)
+                    for args in model_paramgrid
+                )
+            )
+        )
+
         debug_run_complete = True
 
     model_predictions = pd.concat(all_preds)
-    not_feature_cols = [c for c in model_predictions.columns if c not in feature_cols]
+    not_feature_cols = [
+        c for c in model_predictions.columns if c not in feature_cols
+    ]
     model_predictions = model_predictions[not_feature_cols + feature_cols]
-    print('Saving predictions to', Path(args.output_folder, "binary_predictions.csv"))
-    model_predictions.to_csv(Path(args.output_folder, "binary_predictions.csv"), index=False)
-
+    print(
+        "Saving predictions to",
+        Path(args.output_folder, "binary_predictions.parquet"),
+    )
+    model_predictions.to_parquet(
+        Path(args.output_folder, "binary_predictions.parquet"), index=False
+    )

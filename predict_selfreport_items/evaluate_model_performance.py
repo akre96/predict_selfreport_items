@@ -14,6 +14,7 @@ import pingouin as pg
 import matplotlib.pyplot as plt
 import shap
 
+
 def try_roc_auc(x):
     try:
         return roc_auc_score(x.y_true, x.y_pred_proba)
@@ -109,17 +110,10 @@ def get_best_model_performance_and_predictions(
     groupby: list[str] = ["outcome"],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # Group by outcome, feature_set, and model, and calculate the mean of test_roc_auc
-    grouped_df = performance_df.groupby(groupby + ['model'])[
-        metric
-    ].mean()
+    grouped_df = performance_df.groupby(groupby + ["model"])[metric].mean()
 
     # Find the model with the highest test_roc_auc for each outcome and feature_set
-    best_models = (
-        grouped_df.groupby(groupby)
-        .idxmax()
-        .str[-1]
-        .reset_index()
-    )
+    best_models = grouped_df.groupby(groupby).idxmax().str[-1].reset_index()
     best_models = best_models.rename(columns={metric: "model"})
 
     # Merge the best_models with the original dataframe to get the full row
@@ -141,18 +135,34 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output_folder",
-        default="results",
+        default="tmp_out",
         help="Folder to save results to",
     )
     parser.add_argument(
         "--predictions_file",
-        help='Path to predictions file from predict_selfreport_evaluation.py.',
-        required=True,
+        default="tmp_out/binary_predictions.parquet",
+        help="Path to predictions file from predict_selfreport_evaluation.py.",
     )
 
     args = parser.parse_args()
-    model_predictions = pd.read_csv(args.predictions_file)
+    model_predictions = pd.read_parquet(args.predictions_file)
 
+    info_cols = [
+        "y_true",
+        "y_pred",
+        "y_pred_proba",
+        "SHAP_values",
+        "redcap_event_name",
+        "survey_start",
+        "user_id",
+        "fold",
+        "model",
+        "outcome",
+        "survey",
+        "n_users",
+        "n",
+    ]
+    feature_cols = [c for c in model_predictions.columns if not c in info_cols]
     binary_performance_df = get_bootstrapped_performance(
         model_predictions,
         groupby=["model", "survey", "outcome", "fold"],
@@ -208,6 +218,7 @@ if __name__ == "__main__":
             [
                 "survey",
                 "outcome",
+                "model",
                 "mean_auroc",
                 "median_auroc",
                 "max_auroc",
@@ -218,17 +229,18 @@ if __name__ == "__main__":
             ]
         ]
     )
-    # TODO: Refactor looking at SHAP values to another file
+
+    ## Plot SHAP values for significant outcomes
     sig_perf = binary_performance_test[
-        binary_performance_test.p_adj < 0.05
+        binary_performance_test.p_adj < 0.5
     ].copy()
     significant_surveys = binary_performance_test[
         binary_performance_test.outcome.isin(sig_perf.outcome.tolist())
     ][["survey", "outcome"]]
 
-    for (survey, item), s_df in best_model_predictions[
-        best_model_predictions.outcome.isin(significant_surveys.outcome.unique())
-    ].groupby(["survey", "outcome"]):
+    for (survey, item), s_df in best_model_predictions.groupby(
+        ["survey", "outcome"]
+    ):
         shap.summary_plot(
             np.stack(s_df.SHAP_values.values),
             s_df[feature_cols],
@@ -243,4 +255,13 @@ if __name__ == "__main__":
         else:
             title = f"{survey}: {item}"
         plt.title(title, fontsize=15)
-        plt.show()
+        # Save plot
+        plt.savefig(
+            Path(
+                args.output_folder,
+                f"{survey}_{item}",
+                f"shap_{survey}_{item}.png",
+            ),
+            bbox_inches="tight",
+        )
+        plt.close()

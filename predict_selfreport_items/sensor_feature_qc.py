@@ -37,6 +37,15 @@ if __name__ == "__main__":
     qc_features.loc[
         qc_features.sleep_Awake_mean.isna(), "sleep_Awake_mean"
     ] = 0
+    qc_features.loc[
+        qc_features.sleep_CategoryValueUnknown_mean.isna(),
+        "sleep_CategoryValueUnknown_mean",
+    ] = 0
+    qc_features.loc[
+        qc_features.audioExposure_mean > 200, "audioExposure_mean"
+    ] = 200
+    # Noise data
+
     print("Sensor features shape:", sensor_features.shape)
     print("QC features shape:", qc_features.shape)
 

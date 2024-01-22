@@ -29,8 +29,7 @@ from p_tqdm import p_map
 import warnings
 
 
-def get_hkmetrics(user_hk, user_id, ts, window):
-    duration = f"{window}days"
+def get_hkmetrics(user_hk, user_id, ts, duration):
     hk_window_data = simple_features.getDurationAroundTimestamp(
         user_hk, user_id, ts, duration=duration
     )
@@ -61,7 +60,7 @@ def get_hkmetrics(user_hk, user_id, ts, window):
         hk_window_data,
     )
     paee = simple_features.aggregateActiveDuration(
-        hk_window_data, "ActiveEnergyBurned", qc=False
+        hk_window_data, "ActiveEnergyBurned"
     )
     etime = simple_features.aggregateActiveDuration(
         hk_window_data, "AppleExerciseTime"
@@ -147,96 +146,6 @@ def get_hkmetrics(user_hk, user_id, ts, window):
     hk_metrics["expected_duration"] = duration
 
     return hk_metrics
-
-
-def collectHKMetrics(subject_data):
-    hr = simple_features.aggregateVital(
-        subject_data,
-        "HeartRate",
-        resample="1h",
-        vital_range=(30, 200),
-        standard_aggregations=[
-            "mean",
-            "std",
-            "min",
-            "max",
-            "median",
-            "count",
-            "skew",
-            "kurtosis",
-        ],
-        circadian_model_aggregations=True,
-        linear_time_aggregations=False,
-    )
-    hrv = simple_features.aggregateVital(
-        subject_data,
-        "HeartRateVariabilitySDNN",
-        resample="1h",
-        vital_range=(0, 3),
-        standard_aggregations=[
-            "mean",
-            "min",
-            "max",
-            "std",
-            "median",
-        ],
-        linear_time_aggregations=False,
-        circadian_model_aggregations=False,
-    )
-    spo2 = simple_features.aggregateVital(
-        subject_data,
-        "OxygenSaturation",
-        resample="1h",
-        vital_range=(0, 40),
-        standard_aggregations=[
-            "mean",
-            "std",
-            "min",
-            "max",
-            "median",
-        ],
-        linear_time_aggregations=False,
-        circadian_model_aggregations=False,
-    )
-    rr = simple_features.aggregateVital(
-        subject_data,
-        "RespiratoryRate",
-        resample="1h",
-        vital_range=(0, 40),
-        standard_aggregations=[
-            "mean",
-            "std",
-            "min",
-            "max",
-            "median",
-        ],
-        linear_time_aggregations=False,
-        circadian_model_aggregations=False,
-    )
-    hr["QC_duration_days"] = (
-        subject_data["local_start"].max() - subject_data["local_start"].min()
-    ) / np.timedelta64(1, "D")
-    hr["QC_ndates"] = subject_data["local_start"].dt.date.nunique()
-
-    try:
-        sleep = simple_features.aggregateDailySleep(subject_data)
-    except ValueError:
-        sleep = pd.DataFrame()
-    exercise_time = simple_features.aggregateActiveDuration(
-        subject_data, "AppleExerciseTime"
-    )
-    paee = simple_features.aggregateActiveDuration(
-        subject_data, "ActiveEnergyBurned"
-    )
-    steps = simple_features.aggregateActiveDuration(subject_data, "StepCount")
-    watch_on = simple_features.processWatchOnPercent(
-        subject_data, resample="1h"
-    )
-    feature_data = pd.concat(
-        [hr, hrv, spo2, rr, sleep, exercise_time, paee, steps], axis=1
-    )
-    feature_data["QC_watch_on_percent"] = watch_on
-    return feature_data
 
 
 if __name__ == "__main__":
@@ -331,20 +240,11 @@ if __name__ == "__main__":
 
         def HKMetricWrapper(inputs):
             user, survey_start, duration = inputs
-            subject_data = simple_features.getDurationAroundTimestamp(
-                hk_data,
-                user,
-                survey_start,
-                duration,
-            )
-            if subject_data.empty:
-                return pd.DataFrame()
-
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
-                feature_data = collectHKMetrics(subject_data)
-            feature_data["user_id"] = user
-            feature_data["survey_start"] = survey_start
+                feature_data = get_hkmetrics(
+                    hk_data, user, survey_start, duration
+                )
             feature_data["duration"] = duration
 
             return feature_data
