@@ -212,6 +212,13 @@ if __name__ == "__main__":
             f"No surveys found in {args.survey_data} for {args.surveys}"
         )
     relevant_surveys["user_id"] = relevant_surveys["user_id"].astype(int)
+
+    print('Making PHQ and PVSS all 1 week aggregations')
+    relevant_surveys.loc[
+        relevant_surveys.survey.isin(['phq14', 'pvss']),
+        'duration'
+    ] = '7days'
+
     # Get unique timestamps and durations for aggregations
     timepoint_df = (
         relevant_surveys[["user_id", "survey_start", "duration"]]
@@ -248,7 +255,6 @@ if __name__ == "__main__":
             feature_data["duration"] = duration
 
             return feature_data
-
         inputs = [
             (uid, survey_start, duration)
             for survey_start, duration in u_df[

@@ -44,9 +44,10 @@ import multiprocessing
 
 NUM_CORES = multiprocessing.cpu_count()
 N_JOBS_CV = 5
-N_PROC = np.floor(2 * NUM_CORES / N_JOBS_CV).astype(int)
-if N_PROC == 0:
-    N_PROC = 1
+N_PROC = 5
+if N_PROC > NUM_CORES:
+    N_PROC = NUM_CORES
+
 print(
     f"Using {N_PROC} cores for parallel processing with {N_JOBS_CV} jobs per core"
 )
@@ -55,7 +56,6 @@ print(
 def train_test_model(
     outcome_df: pd.DataFrame,
     hk_feature_df: pd.DataFrame,
-    metrics: list[str],
     hk_features: list[str],
     demographics: pd.DataFrame | None = None,
     demog_features: list[str] = [],
@@ -222,6 +222,11 @@ if __name__ == "__main__":
         action="store_true",
         help="rerun cached models",
     )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="whether to run in parallel",
+    )
     args = parser.parse_args()
 
     inner_cv = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -241,7 +246,7 @@ if __name__ == "__main__":
     sensor_features = pd.read_csv(
         args.sensor_features, parse_dates=["survey_start"]
     )
-    binary_thresholds = pd.read_excel(args.binary_thresholds).dropna()
+    binary_thresholds = pd.read_excel(args.binary_thresholds)
 
     survey_data = survey_data.merge(binary_thresholds, how="inner")
     survey_data["response_binary"] = (
@@ -304,50 +309,47 @@ if __name__ == "__main__":
                 "feature_select__score_func": [mutual_info_classif, f_classif],
             },
         ),
-        ("dummy", DummyClassifier(), {}),
+       ("dummy", DummyClassifier(), {}),
     ]
 
     # Cross-validation performed for each item
     print("Running cross-validation")
-    debug_run_complete = False
-    for i, ((item, survey), item_df) in enumerate(
-        tqdm(
-            survey_data.groupby(["question", "survey"]),
-        )
-    ):
-        if args.debug and debug_run_complete:
-            break
+
+    def train_test_item_wrapper(input_args: Tuple[Tuple[str, str], pd.DataFrame]) -> pd.DataFrame:
+        (item, survey), item_df = input_args
 
         item_df = item_df.dropna(subset=["response_binary"])
         if item_df.response_binary.nunique() < 2:
             print(
                 f"Skipping {survey} - {item} due to homogenous response: {item_df.response_binary.value_counts()}"
             )
-            continue
+            return pd.DataFrame()
 
         if item_df.shape[0] < 20:
             print(
                 f"Skipping {survey} - {item} due to low sample size ({item_df.shape[0]})"
             )
-            continue
+            return pd.DataFrame()
         if item_df.response.nunique() < 2:
             print(
                 f"Skipping {survey} - {item} due to homogenous response: {item_df.response.value_counts()}"
             )
-            continue
+            return pd.DataFrame()
 
-        def train_test_wrapper(input_args):
+        item_folder = Path(args.output_folder, f"{survey}_{item}")
+        if not item_folder.exists():
+            item_folder.mkdir()
+
+        def getModelPredictions(input_args):
             model_name, model, param_grid = input_args
             model_folder = Path(args.output_folder, f"{survey}_{item}")
-            if not model_folder.exists():
-                model_folder.mkdir()
-            out_path = Path(model_folder, f"{survey}_{item}_{model_name}.pkl")
+            model_out = Path(model_folder, f"{survey}_{item}_{model_name}.pkl")
             predictions_out = Path(
                 model_folder,
                 f"{survey}_{item}_{model_name}_predictions.parquet",
             )
             if (
-                out_path.exists()
+                model_out.exists()
                 and predictions_out.exists()
                 and not args.rerun_cached
             ):
@@ -358,7 +360,6 @@ if __name__ == "__main__":
             predictions, trained_model = train_test_model(
                 item_df,
                 sensor_features,
-                binary_metrics,
                 feature_cols,
                 demographics=None,
                 demog_features=[],
@@ -375,21 +376,37 @@ if __name__ == "__main__":
             predictions["n_users"] = item_df.user_id.nunique()
             predictions["n"] = item_df.shape[0]
 
-            with open(out_path, "wb") as f:
+            with open(model_out, "wb") as f:
                 pickle.dump(trained_model, f)
             predictions.to_parquet(predictions_out, index=False)
             return predictions
 
-        all_preds.append(
-            pd.concat(
-                Parallel(n_jobs=N_PROC)(
-                    delayed(train_test_wrapper)(args)
-                    for args in model_paramgrid
-                )
-            )
+        return (
+            pd.concat([
+                getModelPredictions(args) for args in model_paramgrid
+            ])
         )
 
-        debug_run_complete = True
+
+    if args.debug:
+        survey_data = survey_data[survey_data.question == "phq14_total_score"]
+    
+    if args.parallel:
+        all_preds = Parallel(n_jobs=N_PROC)(
+            delayed(train_test_item_wrapper)(input_args)
+            for input_args in tqdm(
+                survey_data.groupby(["question", "survey"]),
+                desc="Running cross-validation in parallel",
+            )
+        )
+    else:
+        all_preds = [
+            train_test_item_wrapper(input_args)
+            for input_args in tqdm(
+                survey_data.groupby(["question", "survey"]),
+                desc="Running cross-validation",
+            )
+        ]
 
     model_predictions = pd.concat(all_preds)
     not_feature_cols = [
