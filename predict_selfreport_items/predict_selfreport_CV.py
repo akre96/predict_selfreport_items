@@ -309,13 +309,15 @@ if __name__ == "__main__":
                 "feature_select__score_func": [mutual_info_classif, f_classif],
             },
         ),
-       ("dummy", DummyClassifier(), {}),
+        ("dummy", DummyClassifier(), {}),
     ]
 
     # Cross-validation performed for each item
     print("Running cross-validation")
 
-    def train_test_item_wrapper(input_args: Tuple[Tuple[str, str], pd.DataFrame]) -> pd.DataFrame:
+    def train_test_item_wrapper(
+        input_args: Tuple[Tuple[str, str], pd.DataFrame]
+    ) -> pd.DataFrame:
         (item, survey), item_df = input_args
 
         item_df = item_df.dropna(subset=["response_binary"])
@@ -381,16 +383,13 @@ if __name__ == "__main__":
             predictions.to_parquet(predictions_out, index=False)
             return predictions
 
-        return (
-            pd.concat([
-                getModelPredictions(args) for args in model_paramgrid
-            ])
+        return pd.concat(
+            [getModelPredictions(args) for args in model_paramgrid]
         )
-
 
     if args.debug:
         survey_data = survey_data[survey_data.question == "phq14_total_score"]
-    
+
     if args.parallel:
         all_preds = Parallel(n_jobs=N_PROC)(
             delayed(train_test_item_wrapper)(input_args)

@@ -35,3 +35,8 @@ poetry run python predict_selfreport_items/predict_selfreport_CV.py \
     --sensor-features $QC_SENSOR_OUTPUT \
     --binary-thresholds $THRESHOLDS \
     --output-folder $MODEL_OUTPUT \
+
+## Evaluate Predictions
+poetry run python predict_selfreport_items/evaluate_predictions.py \
+    --output_folder $MODEL_OUTPUT \
+    --predictions_file $MODEL_OUTPUT/binary_predictions.parquet\

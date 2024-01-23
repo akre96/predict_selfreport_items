@@ -13,6 +13,7 @@ from joblib import Parallel, delayed
 import pingouin as pg
 import matplotlib.pyplot as plt
 import shap
+from tqdm import tqdm
 
 
 def try_roc_auc(x):
@@ -40,10 +41,22 @@ def calc_performance(
     prediction_df: pd.DataFrame,
     groupby: list[str] = ["model", "outcome", "fold"],
 ):
-    roc_auc = prediction_df.groupby(groupby).apply(try_roc_auc)
-    pr_auc = prediction_df.groupby(groupby).apply(try_average_precision)
-    balanced_accuracy = prediction_df.groupby(groupby).apply(
-        try_balanced_accuracy
+    # Filter groups with only one class
+    prediction_filtered_df = prediction_df.groupby(groupby).filter(
+        lambda x: x.y_true.nunique() > 1
+    )
+    if prediction_filtered_df.empty:
+        return pd.DataFrame()
+
+    roc_auc = prediction_filtered_df.groupby(groupby).apply(
+        try_roc_auc, include_groups=False
+    )
+    pr_auc = prediction_filtered_df.groupby(groupby).apply(
+        try_average_precision, include_groups=False
+    )
+    balanced_accuracy = prediction_filtered_df.groupby(groupby).apply(
+        try_balanced_accuracy,
+        include_groups=False,
     )
     n = prediction_df.groupby(groupby).size()
     sample_performance = pd.concat(
@@ -68,6 +81,8 @@ def get_bootstrapped_performance(
         bootstrap_sample = prediction_df.groupby(groupby + [unit]).sample(
             n=1, replace=True
         )
+        if bootstrap_sample.y_true.nunique() < 2:
+            return pd.DataFrame()
         sample_perf = calc_performance(bootstrap_sample, groupby=groupby)
         sample_perf["has_null"] = sample_perf.isnull().any(axis=1)
         sample_perf["bootstrap"] = i
@@ -89,6 +104,7 @@ def get_bootstrapped_performance(
                 "roc_auc": "mean",
                 "pr_auc": "mean",
                 "balanced_accuracy": "mean",
+                "n": "mean",
             }
         )
         .reset_index()
@@ -147,6 +163,22 @@ if __name__ == "__main__":
     args = parser.parse_args()
     model_predictions = pd.read_parquet(args.predictions_file)
 
+    # Print sample size used
+    sample_size_inp = model_predictions[
+        ["user_id", "redcap_event_name", "survey"]
+    ].drop_duplicates()
+    print(
+        '\n',
+        "Sample size:",
+        '\n',
+        sample_size_inp.groupby("survey").aggregate(
+            {"user_id": "nunique", "redcap_event_name": "count"}
+        ).rename(
+            columns={"user_id": "n_users", "redcap_event_name": "n_responses"}
+        ),
+        '\n'
+    )
+
     info_cols = [
         "y_true",
         "y_pred",
@@ -163,6 +195,9 @@ if __name__ == "__main__":
         "n",
     ]
     feature_cols = [c for c in model_predictions.columns if not c in info_cols]
+    
+    # Calculate performance
+    print("Calculating performance\n")
     binary_performance_df = get_bootstrapped_performance(
         model_predictions,
         groupby=["model", "survey", "outcome", "fold"],
@@ -181,8 +216,9 @@ if __name__ == "__main__":
     )
     best_model_performance["p"] = np.nan
     binary_perf_results = []
-    for it, it_df in best_model_performance.groupby(
-        ["survey", "outcome", "model"]
+    for it, it_df in tqdm(
+        best_model_performance.groupby(["survey", "outcome", "model"]),
+        desc="Testing performance",
     ):
         # test that test_roc_auc is > 0 with p value of 0.05 or less
         auroc_result = pg.ttest(it_df.test_roc_auc, 0.5, alternative="greater")
@@ -199,9 +235,14 @@ if __name__ == "__main__":
         binary_perf_results.append(auroc_result)
 
     binary_performance_test = pd.concat(binary_perf_results)
-    binary_performance_test["p_adj"] = pg.multicomp(
-        binary_performance_test["p-val"], method="fdr_bh"
-    )[1]
+
+    def adjust_pval(group):
+        group["p_adj"] = pg.multicomp(group["p-val"], method="fdr_bh")[1]
+        return group
+
+    binary_performance_test = binary_performance_test.groupby("survey").apply(
+        adjust_pval
+    )
     binary_performance_test = binary_performance_test.sort_values(
         "p_adj", ascending=True
     )
