@@ -48,9 +48,6 @@ N_PROC = 5
 if N_PROC > NUM_CORES:
     N_PROC = NUM_CORES
 
-print(
-    f"Using {N_PROC} cores for parallel processing with {N_JOBS_CV} jobs per core"
-)
 
 
 def train_test_model(
@@ -67,7 +64,7 @@ def train_test_model(
         "feature_select__k": [10, "all"],
         "feature_select__score_func": [mutual_info_classif, f_classif],
     },
-    n_folds: int = 5,
+    n_folds: int = 10,
 ) -> Tuple[pd.DataFrame, object]:
     ml_data = hk_feature_df.merge(
         outcome_df, on=["user_id", "survey_start"], how="left", validate="1:1"
@@ -86,8 +83,8 @@ def train_test_model(
     y = ml_data["response_binary"].astype(int)
     pipe = Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
             ("variance_threshold", VarianceThreshold()),
+            ("imputer", SimpleImputer(strategy="median")),
             ("feature_select", SelectKBest(k="all")),
             ("scaler", RobustScaler(quantile_range=(5, 95))),
             ("model", model),
@@ -135,11 +132,11 @@ def train_test_model(
             selected_mask = feature_select.get_support()
 
             # Get the feature names from the imputer
-            imputer = random_search.best_estimator_.named_steps["imputer"]
-            feature_names_after_imputation = imputer.get_feature_names_out()
+            thresholder = random_search.best_estimator_.named_steps["variance_threshold"]
+            feature_names_after_thresholding = thresholder.get_feature_names_out()
 
             # Index into the feature names with the mask
-            selected_feature_names = feature_names_after_imputation[
+            selected_feature_names = feature_names_after_thresholding[
                 selected_mask
             ]
             if isinstance(m, RandomForestClassifier) or isinstance(
@@ -190,6 +187,102 @@ def train_test_model(
     full_model = random_search.fit(X, y)
     return predictions, full_model.best_estimator_
 
+def train_test_item_wrapper(
+    item_df: pd.DataFrame,
+    sensor_features: pd.DataFrame,
+    output_folder: Path | str,
+    feature_cols: list[str],
+    model_paramgrid: list[tuple[str, object, dict]],
+    nona_cols: list[str] = ['response_binary'],
+    n_folds: int = 10,
+    rerun_cached: bool = False,
+) -> pd.DataFrame:
+    if item_df.survey.nunique() > 1:
+        raise ValueError('Multiple surveys found in item_df')
+    if item_df.question.nunique() > 1:
+        raise ValueError('Multiple items found in item_df')
+
+    survey = item_df.survey.unique()[0]
+    item = item_df.question.unique()[0]
+    item_df = item_df.dropna(subset=["response_binary"])
+    duration = item_df.duration.unique()[0]
+    if item_df.duration.nunique() > 1:
+        raise ValueError(f'Multiple durations found in item_df, {item_df.duration.unique()}')
+    item_df['survey_start'] = pd.to_datetime(item_df.survey_start)
+    sensor_features['survey_start'] = pd.to_datetime(sensor_features.survey_start)
+
+    use_sensor_features = sensor_features.merge(
+        item_df[["user_id", "survey_start", "duration"]]
+
+    )
+    if use_sensor_features.QC_expected_duration.nunique() > 1:
+        raise ValueError(f'Multiple durations found in sensor_features, {sensor_features.QC_expected_duration.unique()}')
+
+    if item_df.response_binary.nunique() < 2:
+        print(
+            f"Skipping {survey} - {item} due to homogenous response: {item_df.response_binary.value_counts()}"
+        )
+        return pd.DataFrame()
+
+    if item_df.shape[0] < 20:
+        print(
+            f"Skipping {survey} - {item} due to low sample size ({item_df.shape[0]})"
+        )
+        return pd.DataFrame()
+    if item_df.response.nunique() < 2:
+        print(
+            f"Skipping {survey} - {item} due to homogenous response: {item_df.response.value_counts()}"
+        )
+        return pd.DataFrame()
+
+    item_folder = Path(output_folder, f"{survey}_{item}_{duration}")
+    if not item_folder.exists():
+        item_folder.mkdir()
+
+    inner_cv = KFold(n_splits=5, shuffle=True, random_state=42)
+    def getModelPredictions(input_args):
+        model_name, model, param_grid = input_args
+        model_out = Path(item_folder, f"{survey}_{item}_{model_name}_{duration}.pkl")
+        predictions_out = Path(
+            item_folder,
+            f"{survey}_{item}_{model_name}_{duration}_predictions.parquet",
+        )
+        if (
+            model_out.exists()
+            and predictions_out.exists()
+            and not rerun_cached
+        ):
+            print(
+                f"Skipping {survey} - {item} - {model_name} due to existing output"
+            )
+            return pd.read_parquet(predictions_out)
+        predictions, trained_model = train_test_model(
+            item_df,
+            use_sensor_features,
+            hk_features=feature_cols,
+            demographics=None,
+            demog_features=[],
+            dropna_subset=nona_cols,
+            inner_cv=inner_cv,
+            model_name=model_name,
+            model=model,
+            param_grid=param_grid,
+            n_folds=n_folds,
+        )
+        predictions["outcome"] = item
+        predictions["survey"] = survey
+        predictions["duration"] = duration
+        predictions["model"] = model_name
+
+        with open(model_out, "wb") as f:
+            pickle.dump(trained_model, f)
+        predictions.to_parquet(predictions_out, index=False)
+        return predictions
+
+    return pd.concat(
+        [getModelPredictions(args) for args in model_paramgrid]
+    )
+
 
 ## RUN MODELING
 if __name__ == "__main__":
@@ -201,7 +294,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sensor-features",
-        type=str,
         help="csv file containing sensor features",
     )
     parser.add_argument(
@@ -229,7 +321,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    inner_cv = KFold(n_splits=5, shuffle=True, random_state=42)
     binary_metrics = ["roc_auc", "average_precision"]
 
     print("Checking input files")
@@ -252,6 +343,11 @@ if __name__ == "__main__":
     survey_data["response_binary"] = (
         pd.to_numeric(survey_data.response) >= survey_data.threshold
     )
+    print("setting duration for all PVSS & PHQ14 surveys to 7 days")
+    survey_data.loc[
+        survey_data.survey.isin(["pvss", "phq14"]),
+        "duration",
+    ] = '7days'
 
     if not Path(args.output_folder).exists():
         print(f"Creating output folder {args.output_folder}")
@@ -273,7 +369,6 @@ if __name__ == "__main__":
 
     all_preds = []
 
-    cv = StratifiedGroupKFold(n_splits=10)
     model_paramgrid = [
         (
             "rf",
@@ -284,7 +379,7 @@ if __name__ == "__main__":
                 "model__min_samples_leaf": [2, 5, 10],
                 "model__max_features": [None, "sqrt", "log2"],
                 "model__random_state": [42],
-                "feature_select__k": [10, "all"],
+                "feature_select__k": [10, 50,"all"],
                 "feature_select__score_func": [mutual_info_classif, f_classif],
             },
         ),
@@ -297,7 +392,7 @@ if __name__ == "__main__":
                 "model__min_samples_leaf": [2, 5, 10],
                 "model__max_features": [None, "sqrt", "log2"],
                 "model__random_state": [42],
-                "feature_select__k": [10, "all"],
+                "feature_select__k": [10, 50, "all"],
                 "feature_select__score_func": [mutual_info_classif, f_classif],
             },
         ),
@@ -305,7 +400,7 @@ if __name__ == "__main__":
             "lr",
             LogisticRegression(),
             {
-                "feature_select__k": [10, "all"],
+                "feature_select__k": [10, 50, "all"],
                 "feature_select__score_func": [mutual_info_classif, f_classif],
             },
         ),
@@ -314,94 +409,28 @@ if __name__ == "__main__":
 
     # Cross-validation performed for each item
     print("Running cross-validation")
-
-    def train_test_item_wrapper(
-        input_args: Tuple[Tuple[str, str], pd.DataFrame]
-    ) -> pd.DataFrame:
-        (item, survey), item_df = input_args
-
-        item_df = item_df.dropna(subset=["response_binary"])
-        if item_df.response_binary.nunique() < 2:
-            print(
-                f"Skipping {survey} - {item} due to homogenous response: {item_df.response_binary.value_counts()}"
-            )
-            return pd.DataFrame()
-
-        if item_df.shape[0] < 20:
-            print(
-                f"Skipping {survey} - {item} due to low sample size ({item_df.shape[0]})"
-            )
-            return pd.DataFrame()
-        if item_df.response.nunique() < 2:
-            print(
-                f"Skipping {survey} - {item} due to homogenous response: {item_df.response.value_counts()}"
-            )
-            return pd.DataFrame()
-
-        item_folder = Path(args.output_folder, f"{survey}_{item}")
-        if not item_folder.exists():
-            item_folder.mkdir()
-
-        def getModelPredictions(input_args):
-            model_name, model, param_grid = input_args
-            model_folder = Path(args.output_folder, f"{survey}_{item}")
-            model_out = Path(model_folder, f"{survey}_{item}_{model_name}.pkl")
-            predictions_out = Path(
-                model_folder,
-                f"{survey}_{item}_{model_name}_predictions.parquet",
-            )
-            if (
-                model_out.exists()
-                and predictions_out.exists()
-                and not args.rerun_cached
-            ):
-                print(
-                    f"Skipping {survey} - {item} - {model_name} due to existing output"
-                )
-                return pd.read_parquet(predictions_out)
-            predictions, trained_model = train_test_model(
-                item_df,
-                sensor_features,
-                feature_cols,
-                demographics=None,
-                demog_features=[],
-                dropna_subset=["response_binary"],
-                inner_cv=inner_cv,
-                model_name=model_name,
-                model=model,
-                param_grid=param_grid,
-                n_folds=5,
-            )
-            predictions["outcome"] = item
-            predictions["survey"] = survey
-            predictions["model"] = model_name
-            predictions["n_users"] = item_df.user_id.nunique()
-            predictions["n"] = item_df.shape[0]
-
-            with open(model_out, "wb") as f:
-                pickle.dump(trained_model, f)
-            predictions.to_parquet(predictions_out, index=False)
-            return predictions
-
-        return pd.concat(
-            [getModelPredictions(args) for args in model_paramgrid]
-        )
-
     if args.debug:
         survey_data = survey_data[survey_data.question == "phq14_total_score"]
+        args.parallel = False
 
+    nona_cols = ["response_binary"]
+    n_folds = 10
+    rerun_cached = args.rerun_cached
     if args.parallel:
+        print(
+            f"Using {N_PROC} cores for parallel processing with {N_JOBS_CV} jobs per core"
+        )
         all_preds = Parallel(n_jobs=N_PROC)(
-            delayed(train_test_item_wrapper)(input_args)
-            for input_args in tqdm(
+            delayed(train_test_item_wrapper)(item_df, sensor_features, args.output_folder, feature_cols, model_paramgrid, nona_cols, n_folds, rerun_cached)
+            for _, item_df in tqdm(
                 survey_data.groupby(["question", "survey"]),
                 desc="Running cross-validation in parallel",
             )
         )
     else:
         all_preds = [
-            train_test_item_wrapper(input_args)
-            for input_args in tqdm(
+            train_test_item_wrapper(item_df, sensor_features, args.output_folder, feature_cols, model_paramgrid, nona_cols, n_folds, rerun_cached)
+            for (item, survey), item_df in tqdm(
                 survey_data.groupby(["question", "survey"]),
                 desc="Running cross-validation",
             )

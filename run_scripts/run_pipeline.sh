@@ -1,7 +1,7 @@
 set -euo pipefail
 
 # Inputs
-SURVEY_DATA=~/Data/OPTIMA/OPTIMA_Surveys/survey_data_12Oct2023_ts.csv
+SURVEY_DATA=/Users/sakre/Data/OPTIMA/OPTIMA_Surveys/survey_data_2024-04-26_ts.csv
 SENSOR_DATA_FOLDER=~/Data/OPTIMA/OPTIMA_HealthKit/HealthKit_Datastreams
 SURVEYS="psqi pvss phq14"
 THRESHOLDS=~/Data/OPTIMA/PHQ_PVSS_PSQI_binary_thresholds-Jan212024.xlsx
@@ -35,8 +35,8 @@ poetry run python predict_selfreport_items/predict_selfreport_CV.py \
     --sensor-features $QC_SENSOR_OUTPUT \
     --binary-thresholds $THRESHOLDS \
     --output-folder $MODEL_OUTPUT \
-
+    --parallel
 ## Evaluate Predictions
-poetry run python predict_selfreport_items/evaluate_predictions.py \
+poetry run python predict_selfreport_items/evaluate_model_performance.py \
     --output_folder $MODEL_OUTPUT \
-    --predictions_file $MODEL_OUTPUT/binary_predictions.parquet\
+    --predictions_file $MODEL_OUTPUT/binary_predictions.parquet

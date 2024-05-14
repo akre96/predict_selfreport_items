@@ -53,60 +53,67 @@ def get_hkmetrics(user_hk, user_id, ts, duration):
     ]
     sleep_agg = simple_features.aggregateDailySleep(
         hk_window_data,
-        aggs=["min", "median", "max", "std"],
+        aggs=["min", "mean", "median", "max", "std"],
         sleep_features=agg_sleep_features,
     )
     sleep_cat_agg = simple_features.aggregateSleepCategories(
         hk_window_data,
     )
     paee = simple_features.aggregateActiveDuration(
-        hk_window_data, "ActiveEnergyBurned"
+        hk_window_data, "ActiveEnergyBurned", resample="1D", qc=True,
     )
     etime = simple_features.aggregateActiveDuration(
-        hk_window_data, "AppleExerciseTime"
+        hk_window_data, "AppleExerciseTime", resample="1D", qc=True,
     )
     steps = simple_features.aggregateActiveDuration(
-        hk_window_data, "StepCount"
-    )
-    hr = simple_features.aggregateVital(
-        hk_window_data,
-        "HeartRate",
-        resample="1h",
-        standard_aggregations=["min", "median", "max", "std"],
-        linear_time_aggregations=True,
-        circadian_model_aggregations=True,
-        vital_range=(30, 200),
+        hk_window_data, "StepCount", resample="1D", qc=True,
     )
     noise = simple_features.aggregateAudioExposure(
         hk_window_data,
         resample="1h",
     )
-    hrv = simple_features.aggregateVital(
-        hk_window_data,
-        "HeartRateVariabilitySDNN",
-        resample="1h",
-        standard_aggregations=["min", "median", "max", "std"],
-        linear_time_aggregations=True,
-        circadian_model_aggregations=True,
-        vital_range=(0, 1),
-    )
-    o2sat = simple_features.aggregateVital(
-        hk_window_data,
-        "OxygenSaturation",
-        resample="1h",
-        standard_aggregations=["min", "median", "max", "std"],
-        linear_time_aggregations=True,
-        vital_range=(0.5, 1),
-    )
-    rr = simple_features.aggregateVital(
-        hk_window_data,
-        "RespiratoryRate",
-        resample="1h",
-        standard_aggregations=["min", "median", "max", "std"],
-        linear_time_aggregations=True,
-        circadian_model_aggregations=True,
-        vital_range=(0.1, 100),
-    )
+    vitals = []
+    #for context in ['all', 'sleep', 'non-sleep rest', 'active']:
+    for context in ['all', 'sleep']:
+        model_kwargs = {
+            'linear_time_aggregations': True,
+            'circadian_model_aggregations': False,
+            'standard_aggregations': ["min", "mean", "median", "max", "std", "count"],
+            'context': context,
+            'resample': '1h',
+        }
+        if context == 'all':
+            model_kwargs['circadian_model_aggregations'] = True
+        hr = simple_features.aggregateVital(
+            hk_window_data,
+            "HeartRate",
+            vital_range=(30, 200),
+            **model_kwargs,
+        )
+
+        hrv = simple_features.aggregateVital(
+            hk_window_data,
+            "HeartRateVariabilitySDNN",
+            vital_range=(0, 1),
+            **model_kwargs,
+        )
+        o2sat = simple_features.aggregateVital(
+            hk_window_data,
+            "OxygenSaturation",
+            vital_range=(0.5, 1),
+            **model_kwargs,
+        )
+        rr = simple_features.aggregateVital(
+            hk_window_data,
+            "RespiratoryRate",
+            vital_range=(0.1, 100),
+            **model_kwargs,
+        )
+        vitals.append(hr)
+        vitals.append(hrv)
+        vitals.append(o2sat)
+        vitals.append(rr)
+    
     hk_metrics = pd.concat(
         [
             sleep_agg,
@@ -114,11 +121,8 @@ def get_hkmetrics(user_hk, user_id, ts, duration):
             paee,
             etime,
             steps,
-            hr,
-            hrv,
-            o2sat,
-            rr,
             noise,
+            *vitals,
         ],
         axis=1,
     )
@@ -143,9 +147,31 @@ def get_hkmetrics(user_hk, user_id, ts, duration):
     # Add metadata
     hk_metrics["user_id"] = user_id
     hk_metrics["survey_start"] = ts
-    hk_metrics["expected_duration"] = duration
+    hk_metrics["QC_expected_duration"] = duration
+    hk_metrics["QC_expected_duration_days"] = pd.to_timedelta(
+        duration
+    ) / pd.Timedelta(days=1)
 
     return hk_metrics
+
+
+def loadUserHKData(uid: str, sensor_data_folder: Path):
+    sensor_folders = [
+        f for f in sensor_data_folder.expanduser().iterdir() if f.is_dir()
+    ]
+    hk_data_list = []
+    loader = dataloader.DataLoader()
+    for sensor_folder in sensor_folders:
+        sensor_path = Path(
+            sensor_folder, f"{int(uid)}-{sensor_folder.name}.csv"
+        )
+        if not sensor_path.exists():
+            continue
+        hk_data_list.append(loader.loadData(sensor_path))
+    if len(hk_data_list) == 0:
+        return pd.DataFrame()
+    hk_data = pd.concat(hk_data_list)
+    return hk_data
 
 
 if __name__ == "__main__":
@@ -249,7 +275,7 @@ if __name__ == "__main__":
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 feature_data = get_hkmetrics(
-                    hk_data, user, survey_start, duration
+                    hk_data, user, pd.to_datetime(survey_start), duration
                 )
             feature_data["duration"] = duration
 
