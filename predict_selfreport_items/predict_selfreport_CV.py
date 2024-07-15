@@ -70,6 +70,13 @@ def train_test_model(
         outcome_df, on=["user_id", "survey_start"], how="left", validate="1:1"
     ).dropna(subset=dropna_subset)
 
+    # if feature_select__k min is greater than number of features, set to all
+    if "feature_select__k" in param_grid:
+        int_k = [k for k in param_grid["feature_select__k"] if isinstance(k, int)]
+        if "all" in param_grid["feature_select__k"]:
+            if len(hk_features) < min(int_k):
+                param_grid["feature_select__k"] = ["all"]
+
     input_features = hk_features
     if (demographics is not None) and (len(demog_features) > 0):
         ml_data = ml_data.merge(

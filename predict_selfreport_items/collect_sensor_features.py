@@ -72,9 +72,14 @@ def get_hkmetrics(user_hk, user_id, ts, duration):
         hk_window_data,
         resample="1h",
     )
+    bedrest_noise = simple_features.aggregateAudioExposure(
+        hk_window_data,
+        resample="1h",
+        context="bedrest",
+    )
     vitals = []
     #for context in ['all', 'sleep', 'non-sleep rest', 'active']:
-    for context in ['all', 'sleep']:
+    for context in ['all', 'bedrest']:
         model_kwargs = {
             'linear_time_aggregations': True,
             'circadian_model_aggregations': False,
@@ -122,6 +127,7 @@ def get_hkmetrics(user_hk, user_id, ts, duration):
             etime,
             steps,
             noise,
+            bedrest_noise,
             *vitals,
         ],
         axis=1,
