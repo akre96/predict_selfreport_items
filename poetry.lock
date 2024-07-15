@@ -1048,7 +1048,7 @@ description = "Create features from Apple HealthKit data for a duration prior to
 optional = false
 python-versions = ">=3.10"
 files = []
-develop = true
+develop = false
 
 [package.dependencies]
 numpy = "2.0.0"
@@ -1059,8 +1059,10 @@ pingouin = "^0.5.3"
 tqdm = "^4.65.0"
 
 [package.source]
-type = "directory"
-url = "../mhealth_feature_generation"
+type = "git"
+url = "https://github.com/akre96/mHealth-feature-generation"
+reference = "HEAD"
+resolved_reference = "b8a00e3b0e9584df02d2def681714269fab88025"
 
 [[package]]
 name = "multiprocess"
@@ -2528,4 +2530,4 @@ viz = ["matplotlib", "nc-time-axis", "seaborn"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10"
-content-hash = "e8f67dbe5fc16425599ec8b77a830646b586f28a2f81f3cbd16cec9c11df1195"
+content-hash = "eedef2d09d66784a91f6650e95ea7df4ae6f0eaff5eceb608f0c7c7ff643e748"
