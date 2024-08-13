@@ -49,7 +49,6 @@ if N_PROC > NUM_CORES:
     N_PROC = NUM_CORES
 
 
-
 def train_test_model(
     outcome_df: pd.DataFrame,
     hk_feature_df: pd.DataFrame,
@@ -72,7 +71,9 @@ def train_test_model(
 
     # if feature_select__k min is greater than number of features, set to all
     if "feature_select__k" in param_grid:
-        int_k = [k for k in param_grid["feature_select__k"] if isinstance(k, int)]
+        int_k = [
+            k for k in param_grid["feature_select__k"] if isinstance(k, int)
+        ]
         if "all" in param_grid["feature_select__k"]:
             if len(hk_features) < min(int_k):
                 param_grid["feature_select__k"] = ["all"]
@@ -139,8 +140,12 @@ def train_test_model(
             selected_mask = feature_select.get_support()
 
             # Get the feature names from the imputer
-            thresholder = random_search.best_estimator_.named_steps["variance_threshold"]
-            feature_names_after_thresholding = thresholder.get_feature_names_out()
+            thresholder = random_search.best_estimator_.named_steps[
+                "variance_threshold"
+            ]
+            feature_names_after_thresholding = (
+                thresholder.get_feature_names_out()
+            )
 
             # Index into the feature names with the mask
             selected_feature_names = feature_names_after_thresholding[
@@ -159,6 +164,8 @@ def train_test_model(
             raw_shap_vals = explainer.shap_values(
                 preprocess.transform(X.iloc[test_idx])
             )
+            if len(np.shape(raw_shap_vals)) == 3:
+                raw_shap_vals = raw_shap_vals[:, :, 1]
             if isinstance(raw_shap_vals, list):
                 raw_shap_vals = raw_shap_vals[1]
             temp_shap_df = pd.DataFrame(
@@ -194,36 +201,42 @@ def train_test_model(
     full_model = random_search.fit(X, y)
     return predictions, full_model.best_estimator_
 
+
 def train_test_item_wrapper(
     item_df: pd.DataFrame,
     sensor_features: pd.DataFrame,
     output_folder: Path | str,
     feature_cols: list[str],
     model_paramgrid: list[tuple[str, object, dict]],
-    nona_cols: list[str] = ['response_binary'],
+    nona_cols: list[str] = ["response_binary"],
     n_folds: int = 10,
     rerun_cached: bool = False,
 ) -> pd.DataFrame:
     if item_df.survey.nunique() > 1:
-        raise ValueError('Multiple surveys found in item_df')
+        raise ValueError("Multiple surveys found in item_df")
     if item_df.question.nunique() > 1:
-        raise ValueError('Multiple items found in item_df')
+        raise ValueError("Multiple items found in item_df")
 
     survey = item_df.survey.unique()[0]
     item = item_df.question.unique()[0]
     item_df = item_df.dropna(subset=["response_binary"])
     duration = item_df.duration.unique()[0]
     if item_df.duration.nunique() > 1:
-        raise ValueError(f'Multiple durations found in item_df, {item_df.duration.unique()}')
-    item_df['survey_start'] = pd.to_datetime(item_df.survey_start)
-    sensor_features['survey_start'] = pd.to_datetime(sensor_features.survey_start)
+        raise ValueError(
+            f"Multiple durations found in item_df, {item_df.duration.unique()}"
+        )
+    item_df["survey_start"] = pd.to_datetime(item_df.survey_start)
+    sensor_features["survey_start"] = pd.to_datetime(
+        sensor_features.survey_start
+    )
 
     use_sensor_features = sensor_features.merge(
         item_df[["user_id", "survey_start", "duration"]]
-
     )
     if use_sensor_features.QC_expected_duration.nunique() > 1:
-        raise ValueError(f'Multiple durations found in sensor_features, {sensor_features.QC_expected_duration.unique()}')
+        raise ValueError(
+            f"Multiple durations found in sensor_features, {sensor_features.QC_expected_duration.unique()}"
+        )
 
     if item_df.response_binary.nunique() < 2:
         print(
@@ -247,9 +260,12 @@ def train_test_item_wrapper(
         item_folder.mkdir()
 
     inner_cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
     def getModelPredictions(input_args):
         model_name, model, param_grid = input_args
-        model_out = Path(item_folder, f"{survey}_{item}_{model_name}_{duration}.pkl")
+        model_out = Path(
+            item_folder, f"{survey}_{item}_{model_name}_{duration}.pkl"
+        )
         predictions_out = Path(
             item_folder,
             f"{survey}_{item}_{model_name}_{duration}_predictions.parquet",
@@ -286,9 +302,7 @@ def train_test_item_wrapper(
         predictions.to_parquet(predictions_out, index=False)
         return predictions
 
-    return pd.concat(
-        [getModelPredictions(args) for args in model_paramgrid]
-    )
+    return pd.concat([getModelPredictions(args) for args in model_paramgrid])
 
 
 ## RUN MODELING
@@ -354,7 +368,7 @@ if __name__ == "__main__":
     survey_data.loc[
         survey_data.survey.isin(["pvss", "phq14"]),
         "duration",
-    ] = '7days'
+    ] = "7days"
 
     if not Path(args.output_folder).exists():
         print(f"Creating output folder {args.output_folder}")
@@ -386,7 +400,7 @@ if __name__ == "__main__":
                 "model__min_samples_leaf": [2, 5, 10],
                 "model__max_features": [None, "sqrt", "log2"],
                 "model__random_state": [42],
-                "feature_select__k": [10, 50,"all"],
+                "feature_select__k": [10, 50, "all"],
                 "feature_select__score_func": [mutual_info_classif, f_classif],
             },
         ),
@@ -428,7 +442,16 @@ if __name__ == "__main__":
             f"Using {N_PROC} cores for parallel processing with {N_JOBS_CV} jobs per core"
         )
         all_preds = Parallel(n_jobs=N_PROC)(
-            delayed(train_test_item_wrapper)(item_df, sensor_features, args.output_folder, feature_cols, model_paramgrid, nona_cols, n_folds, rerun_cached)
+            delayed(train_test_item_wrapper)(
+                item_df,
+                sensor_features,
+                args.output_folder,
+                feature_cols,
+                model_paramgrid,
+                nona_cols,
+                n_folds,
+                rerun_cached,
+            )
             for _, item_df in tqdm(
                 survey_data.groupby(["question", "survey"]),
                 desc="Running cross-validation in parallel",
@@ -436,7 +459,16 @@ if __name__ == "__main__":
         )
     else:
         all_preds = [
-            train_test_item_wrapper(item_df, sensor_features, args.output_folder, feature_cols, model_paramgrid, nona_cols, n_folds, rerun_cached)
+            train_test_item_wrapper(
+                item_df,
+                sensor_features,
+                args.output_folder,
+                feature_cols,
+                model_paramgrid,
+                nona_cols,
+                n_folds,
+                rerun_cached,
+            )
             for (item, survey), item_df in tqdm(
                 survey_data.groupby(["question", "survey"]),
                 desc="Running cross-validation",
