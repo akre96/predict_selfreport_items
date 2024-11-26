@@ -7,6 +7,8 @@ from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
     balanced_accuracy_score,
+    recall_score,
+    confusion_matrix,
 )
 import numpy as np
 from joblib import Parallel, delayed
@@ -93,6 +95,7 @@ SURVEY_ITEM_MAP = {
     "pvss_total": "PVSS total score",
 }
 
+
 def try_roc_auc(x):
     try:
         return roc_auc_score(x.y_true, x.y_pred_proba)
@@ -114,6 +117,22 @@ def try_balanced_accuracy(x):
         return np.nan
 
 
+# calculate sensitivity and specificity
+def try_sensitivity(x):
+    try:
+        return recall_score(x.y_true, x.y_pred)
+    except ValueError:
+        return np.nan
+
+
+def try_specificity(x):
+    try:
+        tn, fp, fn, tp = confusion_matrix(x.y_true, x.y_pred).ravel()
+        return tn / (tn + fp)
+    except ValueError:
+        return np.nan
+
+
 def calc_performance(
     prediction_df: pd.DataFrame,
     groupby: list[str] = ["model", "outcome", "fold"],
@@ -126,26 +145,35 @@ def calc_performance(
         return pd.DataFrame()
 
     roc_auc = prediction_filtered_df.groupby(groupby).apply(
-        try_roc_auc,
-        include_groups=False
+        try_roc_auc, include_groups=False
     )
     pr_auc = prediction_filtered_df.groupby(groupby).apply(
-        try_average_precision,
-        include_groups=False
+        try_average_precision, include_groups=False
     )
     balanced_accuracy = prediction_filtered_df.groupby(groupby).apply(
         try_balanced_accuracy,
         include_groups=False,
     )
+    sensitivity = prediction_filtered_df.groupby(groupby).apply(
+        try_sensitivity,
+        include_groups=False,
+    )
+    specificity = prediction_filtered_df.groupby(groupby).apply(
+        try_specificity,
+        include_groups=False,
+    )
     n = prediction_df.groupby(groupby).size()
     sample_performance = pd.concat(
-        [roc_auc, pr_auc, balanced_accuracy, n], axis=1
+        [roc_auc, pr_auc, balanced_accuracy, n, sensitivity, specificity],
+        axis=1,
     )
     sample_performance.columns = [
         "roc_auc",
         "pr_auc",
         "balanced_accuracy",
         "n",
+        "sensitivity",
+        "specificity",
     ]
     return sample_performance
 
@@ -167,7 +195,9 @@ def get_bootstrapped_performance(
             delayed(get_bootstrap_sample)(i) for i in range(n_boot)
         )
     )
-    bootstrap_performance = calc_performance(bootstrap_sample, groupby=groupby).rename(
+    bootstrap_performance = calc_performance(
+        bootstrap_sample, groupby=groupby
+    ).rename(
         columns={
             "roc_auc": "test_roc_auc",
             "pr_auc": "test_average_precision",
@@ -200,7 +230,17 @@ def get_best_model_performance_and_predictions(
 
     # Get the predictions for the best model
     best_model_predictions = predictions_df.merge(
-        best_model_performance[[*groupby, 'model', 'test_roc_auc', 'test_average_precision', 'fold']], how="inner", validate="m:1"
+        best_model_performance[
+            [
+                *groupby,
+                "model",
+                "test_roc_auc",
+                "test_average_precision",
+                "fold",
+            ]
+        ],
+        how="inner",
+        validate="m:1",
     )
 
     return best_model_performance, best_model_predictions, best_models
@@ -254,7 +294,7 @@ if __name__ == "__main__":
         "survey",
         "n_users",
         "n",
-        "duration"
+        "duration",
     ]
     feature_cols = [c for c in model_predictions.columns if not c in info_cols]
 
@@ -285,7 +325,9 @@ if __name__ == "__main__":
     best_model_performance["p"] = np.nan
     binary_perf_results = []
     for it, it_df in tqdm(
-        best_model_performance.groupby(["survey", "outcome", "model", "duration"]),
+        best_model_performance.groupby(
+            ["survey", "outcome", "model", "duration"]
+        ),
         desc="Testing performance",
     ):
         # test that test_roc_auc is > 0 with p value of 0.05 or less
@@ -312,7 +354,9 @@ if __name__ == "__main__":
     binary_performance_test = binary_performance_test.groupby("survey").apply(
         adjust_pval
     )
-    binary_performance_test['label'] = binary_performance_test.outcome.map(SURVEY_ITEM_MAP)
+    binary_performance_test["label"] = binary_performance_test.outcome.map(
+        SURVEY_ITEM_MAP
+    )
     binary_performance_test = binary_performance_test.sort_values(
         "p_adj", ascending=True
     )
@@ -355,7 +399,9 @@ if __name__ == "__main__":
         ["survey", "outcome", "duration"]
     ):
         # fill missing values with median per feature
-        s_df[feature_cols] = s_df[feature_cols].fillna(s_df[feature_cols].median())
+        s_df[feature_cols] = s_df[feature_cols].fillna(
+            s_df[feature_cols].median()
+        )
         shap_vals = np.stack(s_df.SHAP_values.values)
         # Bound shap values to 99.9th percentile
         shap_vals = np.where(
@@ -364,8 +410,8 @@ if __name__ == "__main__":
             shap_vals,
         )
         shap_vals = np.where(
-            shap_vals < np.percentile(shap_vals, .1),
-            np.percentile(shap_vals, .1),
+            shap_vals < np.percentile(shap_vals, 0.1),
+            np.percentile(shap_vals, 0.1),
             shap_vals,
         )
         shap.summary_plot(
@@ -383,8 +429,8 @@ if __name__ == "__main__":
             title = f"{survey}: {item}"
         plt.title(title, fontsize=15)
         shap_out_folder = Path(
-                args.output_folder,
-                f"{survey}_{item}_{duration}",
+            args.output_folder,
+            f"{survey}_{item}_{duration}",
         )
         if not shap_out_folder.exists():
             shap_out_folder.mkdir(parents=True)

@@ -23,7 +23,7 @@ mhealth-feature-generation = {git = "https://github.com/akre96/mHealth-feature-g
 flake8 = "^6.0.0"
 black = "^23.7.0"
 ipykernel = "^6.29.4"
-mhealth-anomaly-detection = {path = "/Users/sakre/Code/dgc/mhealth_anomaly_detection", develop = true}
+mhealth-anomaly-detection = {git = "https://github.com/akre96/mhealth_anomaly_detection"}
 
 [build-system]
 requires = ["poetry-core"]

@@ -16,6 +16,8 @@ ENV PATH="${PATH}:${POETRY_VENV}/bin"
 
 WORKDIR /app
 
+# Install R 3
+RUN apt-get update && apt-get install r-base r-base-dev --yes
 # Install dependencies
 COPY poetry.lock pyproject.toml README.md ./
 COPY predict_selfreport_items ./predict_selfreport_items
